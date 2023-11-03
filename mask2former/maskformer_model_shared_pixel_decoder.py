@@ -16,9 +16,10 @@ from detectron2.utils.memory import retry_if_cuda_oom
 from .modeling.criterion import SetCriterion
 from .modeling.matcher import HungarianMatcher
 
+import numpy as np
 
 @META_ARCH_REGISTRY.register()
-class MaskFormer(nn.Module):
+class MaskFormer_shared_bb(nn.Module):
     """
     Main class for mask classification semantic segmentation architectures.
     """
@@ -28,8 +29,11 @@ class MaskFormer(nn.Module):
         self,
         *,
         backbone: Backbone,
-        sem_seg_head: nn.Module,
-        criterion: nn.Module,
+        # Add two prediction heads and two criterions
+        anatomy_segmentation_head: nn.Module,
+        pathology_segmentation_head: nn.Module,
+        anatomy_criterion: nn.Module,
+        pathology_criterion: nn.Module,
         num_queries: int,
         object_mask_threshold: float,
         overlap_threshold: float,
@@ -70,8 +74,11 @@ class MaskFormer(nn.Module):
         """
         super().__init__()
         self.backbone = backbone
-        self.sem_seg_head = sem_seg_head
-        self.criterion = criterion
+        #Add two segmentation heads
+        self.anatomy_segmentation_head = anatomy_segmentation_head
+        self.pathology_segmentation_head = pathology_segmentation_head
+        self.anatomy_criterion = anatomy_criterion
+        self.pathology_criterion = pathology_criterion
         self.num_queries = num_queries
         self.overlap_threshold = overlap_threshold
         self.object_mask_threshold = object_mask_threshold
@@ -90,13 +97,25 @@ class MaskFormer(nn.Module):
         self.panoptic_on = panoptic_on
         self.test_topk_per_image = test_topk_per_image
 
+        #Inference arg
+        self._inference_mode = "anatomy"
+
         if not self.semantic_on:
             assert self.sem_seg_postprocess_before_inference
 
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)
-        sem_seg_head = build_sem_seg_head(cfg, backbone.output_shape())
+        #### This ablation simply builds two segmentation heads on a common backbone. It is the most simple way to share 
+        #sem_seg_head = build_sem_seg_head(cfg, backbone.output_shape())
+        
+        #First, we build a segmentation head only for 
+        cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 145
+        anatomy_segmentation_head = build_sem_seg_head(cfg, backbone.output_shape())
+
+        #Second, we build the pathology segmentation head
+        cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 2
+        pathology_segmentation_head = build_sem_seg_head(cfg, backbone.output_shape())
 
         # Loss parameters:
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
@@ -126,8 +145,19 @@ class MaskFormer(nn.Module):
 
         losses = ["labels", "masks"]
 
-        criterion = SetCriterion(
-            sem_seg_head.num_classes,
+        anatomy_criterion = SetCriterion(
+            anatomy_segmentation_head.num_classes,
+            matcher=matcher,
+            weight_dict=weight_dict,
+            eos_coef=no_object_weight,
+            losses=losses,
+            num_points=cfg.MODEL.MASK_FORMER.TRAIN_NUM_POINTS,
+            oversample_ratio=cfg.MODEL.MASK_FORMER.OVERSAMPLE_RATIO,
+            importance_sample_ratio=cfg.MODEL.MASK_FORMER.IMPORTANCE_SAMPLE_RATIO,
+        )
+
+        pathology_criterion = SetCriterion(
+            pathology_segmentation_head.num_classes,
             matcher=matcher,
             weight_dict=weight_dict,
             eos_coef=no_object_weight,
@@ -139,8 +169,10 @@ class MaskFormer(nn.Module):
 
         return {
             "backbone": backbone,
-            "sem_seg_head": sem_seg_head,
-            "criterion": criterion,
+            "anatomy_segmentation_head": anatomy_segmentation_head,
+            "pathology_segmentation_head": pathology_segmentation_head,
+            "anatomy_criterion": anatomy_criterion,
+            "pathology_criterion": pathology_criterion,
             "num_queries": cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES,
             "object_mask_threshold": cfg.MODEL.MASK_FORMER.TEST.OBJECT_MASK_THRESHOLD,
             "overlap_threshold": cfg.MODEL.MASK_FORMER.TEST.OVERLAP_THRESHOLD,
@@ -195,8 +227,10 @@ class MaskFormer(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        outputs = self.sem_seg_head(features)
-
+        #outputs = self.sem_seg_head(features)
+        output_anatomy_head = self.anatomy_segmentation_head(features)
+        output_pathology_head = self.pathology_segmentation_head(features)
+        
         if self.training:
             # mask classification target
             if "instances" in batched_inputs[0]:
@@ -205,61 +239,154 @@ class MaskFormer(nn.Module):
             else:
                 targets = None
 
-            # bipartite matching-based loss
-            losses = self.criterion(outputs, targets)
+            #Generate the targets for anatomy and pathology. 
+            targets_pathology = []
+            #device = 
+            for idx, batch in enumerate(batched_inputs):
+                target_mask_sizes = targets[idx]["masks"].shape[-2:]
+                source_mask_sizes = batch["pathology_gt"].shape
+                assert len(source_mask_sizes) == 2, f"Got a pathology mask which is not 2 dimensional, but {len(source_mask_sizes)} dimensional."
+                this_labels = torch.from_numpy(np.unique(batch["pathology_gt"])).type(torch.int64)
+                this_maks = torch.zeros([this_labels.size(dim=0),*target_mask_sizes])
+                for label in this_labels:
+                    this_maks[label,:source_mask_sizes[0],:source_mask_sizes[1]][batch["pathology_gt"]==label.item()]=1
+                cur_tagets = {
+                    "labels": this_labels.to(self.device),
+                    "masks": this_maks.type(torch.bool).to(self.device)
+                }
+                targets_pathology.append(cur_tagets)
+    
 
-            for k in list(losses.keys()):
-                if k in self.criterion.weight_dict:
-                    losses[k] *= self.criterion.weight_dict[k]
+            
+            # bipartite matching-based loss
+            losses_anatomy = self.anatomy_criterion(output_anatomy_head, targets)
+            losses_pathology = self.pathology_criterion(output_pathology_head, targets_pathology)
+
+            for k in list(losses_anatomy.keys()):
+                if k in self.anatomy_criterion.weight_dict:
+                    losses_anatomy[k] *= self.anatomy_criterion.weight_dict[k]
                 else:
                     # remove this loss if not specified in `weight_dict`
-                    losses.pop(k)
-            return losses
+                    losses_anatomy.pop(k)
+            
+            for k in list(losses_pathology.keys()):
+                if k in self.pathology_criterion.weight_dict:
+                    losses_pathology[k] *= self.pathology_criterion.weight_dict[k]
+                else:
+                    # remove this loss if not specified in `weight_dict`
+                    losses_pathology.pop(k)
+            
+            #Merge the two loss dicts
+            pathology_anatomy_weight = 0.5
+            merged_losses = {
+                k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k] for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
+            }
+            return merged_losses
         else:
-            mask_cls_results = outputs["pred_logits"]
-            mask_pred_results = outputs["pred_masks"]
-            # upsample masks
-            mask_pred_results = F.interpolate(
-                mask_pred_results,
-                size=(images.tensor.shape[-2], images.tensor.shape[-1]),
-                mode="bilinear",
-                align_corners=False,
-            )
+            
+            if self.inference_mode == "anatomy":
 
-            del outputs
+                #Take care of anatomy
+                mask_cls_results_anatomy = output_anatomy_head["pred_logits"]
+                mask_pred_results_anatomy = output_anatomy_head["pred_masks"]
 
-            processed_results = []
-            for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
-                mask_cls_results, mask_pred_results, batched_inputs, images.image_sizes
-            ):
-                height = input_per_image.get("height", image_size[0])
-                width = input_per_image.get("width", image_size[1])
-                processed_results.append({})
+                mask_pred_results_anatomy = F.interpolate(
+                    mask_pred_results_anatomy,
+                    size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
 
-                if self.sem_seg_postprocess_before_inference:
-                    mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
-                        mask_pred_result, image_size, height, width
-                    )
-                    mask_cls_result = mask_cls_result.to(mask_pred_result)
+                del output_anatomy_head
+                del output_pathology_head
 
-                # semantic segmentation inference
-                if self.semantic_on:
-                    r = retry_if_cuda_oom(self.semantic_inference)(mask_cls_result, mask_pred_result)
-                    if not self.sem_seg_postprocess_before_inference:
-                        r = retry_if_cuda_oom(sem_seg_postprocess)(r, image_size, height, width)
-                    processed_results[-1]["sem_seg"] = r
-
-                # panoptic segmentation inference
-                if self.panoptic_on:
-                    panoptic_r = retry_if_cuda_oom(self.panoptic_inference)(mask_cls_result, mask_pred_result)
-                    processed_results[-1]["panoptic_seg"] = panoptic_r
+                ## Process the results for the anatomy
                 
-                # instance segmentation inference
-                if self.instance_on:
-                    instance_r = retry_if_cuda_oom(self.instance_inference)(mask_cls_result, mask_pred_result)
-                    processed_results[-1]["instances"] = instance_r
+                processed_results_anatomy = []
+                for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
+                    mask_cls_results_anatomy, mask_pred_results_anatomy, batched_inputs, images.image_sizes
+                ):
+                    height = input_per_image.get("height", image_size[0])
+                    width = input_per_image.get("width", image_size[1])
+                    processed_results_anatomy.append({})
 
-            return processed_results
+                    if self.sem_seg_postprocess_before_inference:
+                        mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
+                            mask_pred_result, image_size, height, width
+                        )
+                        mask_cls_result = mask_cls_result.to(mask_pred_result)
+
+                    # semantic segmentation inference
+                    if self.semantic_on:
+                        r = retry_if_cuda_oom(self.semantic_inference)(mask_cls_result, mask_pred_result)
+                        if not self.sem_seg_postprocess_before_inference:
+                            r = retry_if_cuda_oom(sem_seg_postprocess)(r, image_size, height, width)
+                        processed_results_anatomy[-1]["sem_seg"] = r
+
+                    # panoptic segmentation inference
+                    if self.panoptic_on:
+                        panoptic_r = retry_if_cuda_oom(self.panoptic_inference)(mask_cls_result, mask_pred_result)
+                        processed_results_anatomy[-1]["panoptic_seg"] = panoptic_r
+                    
+                    # instance segmentation inference
+                    if self.instance_on:
+                        instance_r = retry_if_cuda_oom(self.instance_inference)(mask_cls_result, mask_pred_result)
+                        processed_results_anatomy[-1]["instances"] = instance_r
+                
+                
+                return processed_results_anatomy
+            
+
+            elif self.inference_mode == "pathology":
+                
+                mask_cls_results_pathology = output_pathology_head["pred_logits"]
+                mask_pred_results_pathology = output_pathology_head["pred_masks"]
+                # upsample pathology masks
+                mask_pred_results_pathology = F.interpolate(
+                    mask_pred_results_pathology,
+                    size=(images.tensor.shape[-2], images.tensor.shape[-1]),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                
+                del output_anatomy_head
+                del output_pathology_head
+                
+                processed_results_pathology = []
+                
+                for mask_cls_result, mask_pred_result, input_per_image, image_size in zip(
+                    mask_cls_results_pathology, mask_pred_results_pathology, batched_inputs, images.image_sizes
+                ):
+                    height = input_per_image.get("height", image_size[0])
+                    width = input_per_image.get("width", image_size[1])
+                    processed_results_pathology.append({})
+
+                    if self.sem_seg_postprocess_before_inference:
+                        mask_pred_result = retry_if_cuda_oom(sem_seg_postprocess)(
+                            mask_pred_result, image_size, height, width
+                        )
+                        mask_cls_result = mask_cls_result.to(mask_pred_result)
+
+                    # semantic segmentation inference
+                    if self.semantic_on:
+                        r = retry_if_cuda_oom(self.semantic_inference)(mask_cls_result, mask_pred_result)
+                        if not self.sem_seg_postprocess_before_inference:
+                            r = retry_if_cuda_oom(sem_seg_postprocess)(r, image_size, height, width)
+                        processed_results_pathology[-1]["sem_seg"] = r
+
+                    # panoptic segmentation inference
+                    if self.panoptic_on:
+                        panoptic_r = retry_if_cuda_oom(self.panoptic_inference)(mask_cls_result, mask_pred_result)
+                        processed_results_pathology[-1]["panoptic_seg"] = panoptic_r
+                    
+                    # instance segmentation inference
+                    if self.instance_on:
+                        instance_r = retry_if_cuda_oom(self.instance_inference)(mask_cls_result, mask_pred_result)
+                        processed_results_pathology[-1]["instances"] = instance_r
+                
+                return processed_results_pathology
+            else:
+                raise ValueError(f"Inference Mode of Model whould only be possible to be either 'anatomy' or 'pathology', but got {self.inference_mode}")
 
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
@@ -378,3 +505,12 @@ class MaskFormer(nn.Module):
         result.scores = scores_per_image * mask_scores_per_image
         result.pred_classes = labels_per_image
         return result
+    
+    @property
+    def inference_mode(self):
+        return self._inference_mode
+
+    @inference_mode.setter
+    def inference_mode(self, mode):
+        assert mode in ["anatomy", "pathology"], f"Expected inference mode to be either anatomy or pathology. Got {mode}"
+        self._inference_mode = mode
