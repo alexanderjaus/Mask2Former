@@ -19,7 +19,7 @@ from .modeling.matcher import HungarianMatcher
 import numpy as np
 
 @META_ARCH_REGISTRY.register()
-class MaskFormer_shared_bb(nn.Module):
+class MaskFormer_shared_bb_pixdecoder(nn.Module):
     """
     Main class for mask classification semantic segmentation architectures.
     """
