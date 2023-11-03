@@ -21,6 +21,7 @@ from .data.dataset_mappers.mask_former_semantic_dataset_mapper import (
 # models
 from .maskformer_model import MaskFormer
 from .maskformer_model_shared_bb import MaskFormer_shared_bb
+from .maskformer_model_shared_pixel_decoder import MaskFormer_shared_bb_pixdecoder
 from .test_time_augmentation import SemanticSegmentorWithTTA
 
 # evaluation
