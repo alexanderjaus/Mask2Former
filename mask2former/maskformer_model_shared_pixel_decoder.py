@@ -29,9 +29,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
         self,
         *,
         backbone: Backbone,
-        # Add two prediction heads and two criterions
-        anatomy_segmentation_head: nn.Module,
-        pathology_segmentation_head: nn.Module,
+        sem_seg_head: nn.Module,
         anatomy_criterion: nn.Module,
         pathology_criterion: nn.Module,
         num_queries: int,
@@ -74,9 +72,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
         """
         super().__init__()
         self.backbone = backbone
-        #Add two segmentation heads
-        self.anatomy_segmentation_head = anatomy_segmentation_head
-        self.pathology_segmentation_head = pathology_segmentation_head
+        self.sem_seg_head = sem_seg_head
         self.anatomy_criterion = anatomy_criterion
         self.pathology_criterion = pathology_criterion
         self.num_queries = num_queries
@@ -106,16 +102,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)
-        #### This ablation simply builds two segmentation heads on a common backbone. It is the most simple way to share 
-        #sem_seg_head = build_sem_seg_head(cfg, backbone.output_shape())
-        
-        #First, we build a segmentation head only for 
-        cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 145
-        anatomy_segmentation_head = build_sem_seg_head(cfg, backbone.output_shape())
-
-        #Second, we build the pathology segmentation head
-        cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 2
-        pathology_segmentation_head = build_sem_seg_head(cfg, backbone.output_shape())
+        sem_seg_head = build_sem_seg_head(cfg, backbone.output_shape())
 
         # Loss parameters:
         deep_supervision = cfg.MODEL.MASK_FORMER.DEEP_SUPERVISION
@@ -146,7 +133,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
         losses = ["labels", "masks"]
 
         anatomy_criterion = SetCriterion(
-            anatomy_segmentation_head.num_classes,
+            145,
             matcher=matcher,
             weight_dict=weight_dict,
             eos_coef=no_object_weight,
@@ -157,7 +144,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
         )
 
         pathology_criterion = SetCriterion(
-            pathology_segmentation_head.num_classes,
+            2,
             matcher=matcher,
             weight_dict=weight_dict,
             eos_coef=no_object_weight,
@@ -169,8 +156,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
 
         return {
             "backbone": backbone,
-            "anatomy_segmentation_head": anatomy_segmentation_head,
-            "pathology_segmentation_head": pathology_segmentation_head,
+            "sem_seg_head": sem_seg_head,
             "anatomy_criterion": anatomy_criterion,
             "pathology_criterion": pathology_criterion,
             "num_queries": cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES,
@@ -227,10 +213,8 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
         images = ImageList.from_tensors(images, self.size_divisibility)
 
         features = self.backbone(images.tensor)
-        #outputs = self.sem_seg_head(features)
-        output_anatomy_head = self.anatomy_segmentation_head(features)
-        output_pathology_head = self.pathology_segmentation_head(features)
-        
+        anatomy_outputs, pathology_outputs = self.sem_seg_head(features)
+
         if self.training:
             # mask classification target
             if "instances" in batched_inputs[0]:
@@ -238,8 +222,8 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
                 targets = self.prepare_targets(gt_instances, images)
             else:
                 targets = None
-
-            #Generate the targets for anatomy and pathology. 
+            
+                        #Generate the targets for anatomy and pathology. 
             targets_pathology = []
             #device = 
             for idx, batch in enumerate(batched_inputs):
@@ -255,12 +239,10 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
                     "masks": this_maks.type(torch.bool).to(self.device)
                 }
                 targets_pathology.append(cur_tagets)
-    
 
-            
             # bipartite matching-based loss
-            losses_anatomy = self.anatomy_criterion(output_anatomy_head, targets)
-            losses_pathology = self.pathology_criterion(output_pathology_head, targets_pathology)
+            losses_anatomy = self.anatomy_criterion(anatomy_outputs, targets)
+            losses_pathology = self.pathology_criterion(pathology_outputs, targets_pathology)
 
             for k in list(losses_anatomy.keys()):
                 if k in self.anatomy_criterion.weight_dict:
@@ -283,12 +265,11 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
             }
             return merged_losses
         else:
-            
             if self.inference_mode == "anatomy":
 
                 #Take care of anatomy
-                mask_cls_results_anatomy = output_anatomy_head["pred_logits"]
-                mask_pred_results_anatomy = output_anatomy_head["pred_masks"]
+                mask_cls_results_anatomy = anatomy_outputs["pred_logits"]
+                mask_pred_results_anatomy = anatomy_outputs["pred_masks"]
 
                 mask_pred_results_anatomy = F.interpolate(
                     mask_pred_results_anatomy,
@@ -297,8 +278,8 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
                     align_corners=False,
                 )
 
-                del output_anatomy_head
-                del output_pathology_head
+                del anatomy_outputs
+                del pathology_outputs
 
                 ## Process the results for the anatomy
                 
@@ -339,8 +320,8 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
 
             elif self.inference_mode == "pathology":
                 
-                mask_cls_results_pathology = output_pathology_head["pred_logits"]
-                mask_pred_results_pathology = output_pathology_head["pred_masks"]
+                mask_cls_results_pathology = pathology_outputs["pred_logits"]
+                mask_pred_results_pathology = pathology_outputs["pred_masks"]
                 # upsample pathology masks
                 mask_pred_results_pathology = F.interpolate(
                     mask_pred_results_pathology,
@@ -349,8 +330,8 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
                     align_corners=False,
                 )
                 
-                del output_anatomy_head
-                del output_pathology_head
+                del anatomy_outputs
+                del pathology_outputs
                 
                 processed_results_pathology = []
                 
@@ -387,6 +368,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
                 return processed_results_pathology
             else:
                 raise ValueError(f"Inference Mode of Model whould only be possible to be either 'anatomy' or 'pathology', but got {self.inference_mode}")
+
 
     def prepare_targets(self, targets, images):
         h_pad, w_pad = images.tensor.shape[-2:]
@@ -506,6 +488,7 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
         result.pred_classes = labels_per_image
         return result
     
+
     @property
     def inference_mode(self):
         return self._inference_mode
