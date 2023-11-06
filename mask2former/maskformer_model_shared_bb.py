@@ -111,10 +111,12 @@ class MaskFormer_shared_bb(nn.Module):
         
         #First, we build a segmentation head only for 
         cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 145
+        cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES = 100
         anatomy_segmentation_head = build_sem_seg_head(cfg, backbone.output_shape())
 
         #Second, we build the pathology segmentation head
         cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 2
+        cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES = 16
         pathology_segmentation_head = build_sem_seg_head(cfg, backbone.output_shape())
 
         # Loss parameters:
@@ -277,7 +279,7 @@ class MaskFormer_shared_bb(nn.Module):
                     losses_pathology.pop(k)
             
             #Merge the two loss dicts
-            pathology_anatomy_weight = 0.5
+            pathology_anatomy_weight = 0.1
             merged_losses = {
                 k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k] for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
             }
