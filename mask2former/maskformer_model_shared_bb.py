@@ -241,22 +241,28 @@ class MaskFormer_shared_bb(nn.Module):
             else:
                 targets = None
 
+            if "instances_path" in batched_inputs[0]:
+                gt_instances_path = [x["instances_path"].to(self.device) for x in batched_inputs]
+                targets_pathology = self.prepare_targets(gt_instances_path, images)
+            else:
+                targets_pathology = None
+
             #Generate the targets for anatomy and pathology. 
-            targets_pathology = []
+            #targets_pathology = []
             #device = 
-            for idx, batch in enumerate(batched_inputs):
-                target_mask_sizes = targets[idx]["masks"].shape[-2:]
-                source_mask_sizes = batch["pathology_gt"].shape
-                assert len(source_mask_sizes) == 2, f"Got a pathology mask which is not 2 dimensional, but {len(source_mask_sizes)} dimensional."
-                this_labels = torch.from_numpy(np.unique(batch["pathology_gt"])).type(torch.int64)
-                this_maks = torch.zeros([this_labels.size(dim=0),*target_mask_sizes])
-                for label in this_labels:
-                    this_maks[label,:source_mask_sizes[0],:source_mask_sizes[1]][batch["pathology_gt"]==label.item()]=1
-                cur_tagets = {
-                    "labels": this_labels.to(self.device),
-                    "masks": this_maks.type(torch.bool).to(self.device)
-                }
-                targets_pathology.append(cur_tagets)
+            #for idx, batch in enumerate(batched_inputs):
+            #    target_mask_sizes = targets[idx]["masks"].shape[-2:]
+            #    source_mask_sizes = batch["pathology_gt"].shape
+            #    assert len(source_mask_sizes) == 2, f"Got a pathology mask which is not 2 dimensional, but {len(source_mask_sizes)} dimensional."
+            #    this_labels = torch.from_numpy(np.unique(batch["pathology_gt"])).type(torch.int64)
+            #    this_maks = torch.zeros([this_labels.size(dim=0),*target_mask_sizes])
+            #    for label in this_labels:
+            #        this_maks[label,:source_mask_sizes[0],:source_mask_sizes[1]][batch["pathology_gt"]==label.item()]=1
+            #    cur_tagets = {
+            #        "labels": this_labels.to(self.device),
+            #        "masks": this_maks.type(torch.bool).to(self.device)
+            #    }
+            #    targets_pathology.append(cur_tagets)
     
 
             
@@ -279,7 +285,7 @@ class MaskFormer_shared_bb(nn.Module):
                     losses_pathology.pop(k)
             
             #Merge the two loss dicts
-            pathology_anatomy_weight = 0.1
+            pathology_anatomy_weight = 0.5
             merged_losses = {
                 k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k] for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
             }
