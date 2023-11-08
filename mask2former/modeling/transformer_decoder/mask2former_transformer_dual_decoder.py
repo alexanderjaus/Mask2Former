@@ -395,6 +395,16 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             self.class_embed_path = nn.Linear(hidden_dim, num_classes_pathology + 1)
         self.mask_embed_path = MLP(hidden_dim, hidden_dim, mask_dim, 3)
 
+        ##Parameters for simple merging
+        self.query_merging_params_ana = nn.ModuleList()
+        self.query_merging_params_patho = nn.ModuleList()
+        for _ in range(self.num_feature_levels):
+            self.query_merging_params_ana.append(
+                torch.nn.Embedding(num_queries, hidden_dim)
+            )
+            self.query_merging_params_patho.append(
+                torch.nn.Embedding(self.num_queries_path, hidden_dim)
+            )
 
 
     @classmethod
@@ -480,7 +490,7 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
 
-        outputs_class_path, outputs_mask_path, attn_mask_path = self.forward_prediction_heads(output_path, mask_features, attn_mask_target_size=size_list_path[0])
+        outputs_class_path, outputs_mask_path, attn_mask_path = self.forward_prediction_heads(output_path, mask_features, attn_mask_target_size=size_list_path[0], dtype="Pathology")
         predictions_class_path.append(outputs_class_path)
         predictions_mask_path.append(outputs_mask_path)
 
@@ -509,11 +519,12 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             )
 
             #Perform for Pathologie. 
-            output_path = self.transformer_cross_attention_layers[i](
+            attn_mask_path[torch.where(attn_mask_path.sum(-1) == attn_mask_path.shape[-1])] = False
+            output_path = self.transformer_cross_attention_layers_pathology[i](
                 output_path, src_path[level_index],
                 memory_mask=attn_mask_path,
                 memory_key_padding_mask=None,
-                pos=pos_path[level_index], query_pos=query_embed
+                pos=pos_path[level_index], query_pos=query_embed_path
             )
 
             output_path = self.transformer_self_attention_layers_pathology[i](
@@ -527,13 +538,21 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             )
 
             ###THIS IS ALL WE DO:
-
+            #OUTPUT Anatomy: QxBSxHD (100X2X256)
+            #OUTPUT Pathology: QXBSXHD (100X2X256)
+            
+            output, output_path =  output + output_path * self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1), output_path + output * self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1)
 
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
             predictions_mask.append(outputs_mask)
 
+            outputs_class_path, outputs_mask_path, attn_mask_path = self.forward_prediction_heads(output_path, mask_features,  attn_mask_target_size=size_list_path[(i + 1) % self.num_feature_levels], dtype="Pathology")
+            predictions_class_path.append(outputs_class_path)
+            predictions_mask_path.append(outputs_mask_path)
+
         assert len(predictions_class) == self.num_layers + 1
+        assert len(predictions_class_path) == self.num_layers +1
 
         out = {
             'pred_logits': predictions_class[-1],
@@ -542,13 +561,21 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
                 predictions_class if self.mask_classification else None, predictions_mask
             )
         }
-        return out
+        out_path = {
+            'pred_logits': predictions_class_path[-1],
+            'pred_masks': predictions_mask_path[-1],
+            'aux_outputs': self._set_aux_loss(
+                predictions_class_path if self.mask_classification else None, predictions_mask_path
+            )
+        }
+        return out, out_path
 
-    def forward_prediction_heads(self, output, mask_features, attn_mask_target_size):
-        decoder_output = self.decoder_norm(output)
+    def forward_prediction_heads(self, output, mask_features, attn_mask_target_size, dtype="anatomy"):
+        
+        decoder_output = self.decoder_norm(output) if dtype == "anatomy" else self.decoder_norm_path(output)
         decoder_output = decoder_output.transpose(0, 1)
-        outputs_class = self.class_embed(decoder_output)
-        mask_embed = self.mask_embed(decoder_output)
+        outputs_class = self.class_embed(decoder_output) if dtype == "anatomy" else self.class_embed_path(decoder_output)
+        mask_embed = self.mask_embed(decoder_output) if dtype == "anatomy" else self.mask_embed_path(decoder_output)
         outputs_mask = torch.einsum("bqc,bchw->bqhw", mask_embed, mask_features)
 
         # NOTE: prediction is of higher-resolution
