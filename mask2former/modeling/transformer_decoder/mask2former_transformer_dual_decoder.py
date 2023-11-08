@@ -344,7 +344,7 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
         self.transformer_ffn_layers_pathology = nn.ModuleList()
 
         for _ in range(self.num_layers):
-            self.transformer_cross_attention_layers_pathology.append(
+            self.transformer_self_attention_layers_pathology.append(
                 SelfAttentionLayer(
                     d_model=hidden_dim,
                     nhead=nheads,
@@ -433,7 +433,7 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
         src = []
         pos = []
         size_list = []
-        dd
+        
         # disable mask, it does not affect performance
         del mask
 
@@ -448,18 +448,44 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
 
         _, bs, _ = src[0].shape
 
+        #Pathology Embeddings
+        src_path = []
+        pos_path = []
+        size_list_path = []
+        #Get positionel Embeddings, level embeddings and input projections 
+        for i in range(self.num_feature_levels):
+            size_list_path.append(x[i].shape[-2:])
+            pos_path.append(self.pe_layer_patho(x[i], None).flatten(2))
+            src_path.append(self.input_proj_path[i](x[i]).flatten(2) + self.level_embed_path.weight[i][None,:,None])
+
+            # flatten NxCxHxW to HWxNxC
+            pos_path[-1] = pos_path[-1].permute(2, 0, 1)
+            src_path[-1] = src_path[-1].permute(2, 0, 1)
+
         # QxNxC
         query_embed = self.query_embed.weight.unsqueeze(1).repeat(1, bs, 1)
         output = self.query_feat.weight.unsqueeze(1).repeat(1, bs, 1)
 
+        query_embed_path = self.query_embed_path.weight.unsqueeze(1).repeat(1, bs, 1)
+        output_path = self.query_feat_path.weight.unsqueeze(1).repeat(1, bs, 1)
+
         predictions_class = []
         predictions_mask = []
+
+        predictions_class_path = []
+        predictions_mask_path = []
 
         # prediction heads on learnable query features
         outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[0])
         predictions_class.append(outputs_class)
         predictions_mask.append(outputs_mask)
 
+        outputs_class_path, outputs_mask_path, attn_mask_path = self.forward_prediction_heads(output_path, mask_features, attn_mask_target_size=size_list_path[0])
+        predictions_class_path.append(outputs_class_path)
+        predictions_mask_path.append(outputs_mask_path)
+
+        
+        
         for i in range(self.num_layers):
             level_index = i % self.num_feature_levels
             attn_mask[torch.where(attn_mask.sum(-1) == attn_mask.shape[-1])] = False
@@ -481,6 +507,27 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             output = self.transformer_ffn_layers[i](
                 output
             )
+
+            #Perform for Pathologie. 
+            output_path = self.transformer_cross_attention_layers[i](
+                output_path, src_path[level_index],
+                memory_mask=attn_mask_path,
+                memory_key_padding_mask=None,
+                pos=pos_path[level_index], query_pos=query_embed
+            )
+
+            output_path = self.transformer_self_attention_layers_pathology[i](
+                output_path, tgt_mask=None,
+                tgt_key_padding_mask=None,
+                query_pos=query_embed_path
+            )
+
+            output_path = self.transformer_ffn_layers_pathology[i](
+                output_path
+            )
+
+            ###THIS IS ALL WE DO:
+
 
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
