@@ -285,7 +285,7 @@ class MaskFormer_shared_bb(nn.Module):
                     losses_pathology.pop(k)
             
             #Merge the two loss dicts
-            pathology_anatomy_weight = 0.5
+            pathology_anatomy_weight = 0.0
             merged_losses = {
                 k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k] for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
             }
