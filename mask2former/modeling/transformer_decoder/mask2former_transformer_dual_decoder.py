@@ -203,6 +203,46 @@ class MLP(nn.Module):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
 
+class QueryMixer_SNE(nn.Module):
+    def __init__(self, nof_anatomy_queries, nof_patho_queries, hidden_dim=256) -> None:
+        super().__init__()
+        self.anatomy_conv = nn.Sequential(
+            nn.Conv1d(hidden_dim,1, kernel_size=1),
+            nn.BatchNorm1d(1),
+            nn.ReLU()
+        )
+        self.pathology_conv = nn.Sequential(
+            nn.Conv1d(hidden_dim,1, kernel_size=1),
+            nn.BatchNorm1d(1),
+            nn.ReLU()
+        )
+        linear_layer_sizes = [nof_anatomy_queries + nof_patho_queries, int((nof_anatomy_queries+nof_anatomy_queries)*0.75), int((nof_anatomy_queries+nof_anatomy_queries)*0.5)]
+        self.fc = nn.Sequential(
+            nn.Linear(linear_layer_sizes[0],linear_layer_sizes[1]),
+            nn.BatchNorm1d(1),
+            nn.ReLU(),
+            nn.Linear(linear_layer_sizes[1],linear_layer_sizes[2]),
+            nn.BatchNorm1d(1),
+            nn.ReLU()
+        )
+        self.upsampler = nn.Conv1d(1,hidden_dim,kernel_size=1)
+    
+    def forward(self,anatomy_queries,pathology_queries):
+        #Assuming shape is Nof_queryXbsXhd
+        
+        nof_queries_a, bs, hd = anatomy_queries.shape
+        nof_queries_p, _, _ = pathology_queries.shape
+        #Step 1: Reshape to BSxHDxQ
+        anatomy_queries = anatomy_queries.permute((1,2,0))
+        pathology_queries = pathology_queries.permute((1,2,0))
+
+        anatomy_down = self.anatomy_conv(anatomy_queries)
+        patholog_down = self.pathology_conv(pathology_queries)
+        mixed_global = self.fc(torch.concat([anatomy_down,patholog_down],dim=2))
+        upsampled = self.upsampler(mixed_global) 
+        return upsampled.permute(2,0,1)
+        
+        
 
 @TRANSFORMER_DECODER_REGISTRY.register()
 class MultiScaleMaskedDualTransformerDecoder(nn.Module):
@@ -269,7 +309,7 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
         super().__init__()
         
         ####### ANATOMICAL PREDICTION HEAD STARTS ###########
-        ##### Alex start tomorrow here
+        
         assert mask_classification, "Only support mask classification model"
         self.mask_classification = mask_classification
 
@@ -407,6 +447,7 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             )
 
 
+
     @classmethod
     def from_config(cls, cfg, in_channels, mask_classification):
         ret = {}
@@ -541,7 +582,33 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             #OUTPUT Anatomy: QxBSxHD (100X2X256)
             #OUTPUT Pathology: QXBSXHD (100X2X256)
             
-            output, output_path =  output + output_path * self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1), output_path + output * self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1)
+            #output, output_path =  output + output_path * self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1), output_path + output * self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1)
+            ############### Variant: Qurey MIXER ###################
+            # Assumption: anatomy, pathology NOFxBSxHD
+            nof_a, bs_a, hd_a = output.shape
+            nof_p, bs_p, hd_p = output_path.shape 
+            assert bs_a == bs_p, f"Assuming batch size for anatomy and pathology should be the same, but got {bs_a} and {bs_p}"
+            assert hd_a == hd_p, f"Assuming hidden dimension for anatomy and pathology should be same, but got {hd_a} and {hd_p}"
+            mixer = QueryMixer_SNE(nof_anatomy_queries=nof_a, nof_patho_queries=nof_p).to(output.device)
+            mixed_path = mixer(output, output_path)
+            output_path = output_path + self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1) * mixed_path
+            ###############################
+            #Ablation: Take out the most important queries
+            #output, output_path =  output + output_path * self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1), output_path + output * self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1)
+            #Normalize and reshape to BSXQXH
+            
+            #norm_output = output.detach() / output.detach().norm(dim=2)[:,:,None]
+            #norm_output = norm_output.transpose(0,1)
+            #norm_path = output_path.detach() / output_path.detach().norm(dim=2)[:,:, None]
+            #norm_path = norm_path.transpose(0,1)
+            
+            #cosine_similarity_matrix = torch.bmm(norm_output, norm_path.transpose(1,2))
+            #weighted_anatomy_queries = torch.bmm(cosine_similarity_matrix,norm_output)
+
+            #Reshape back to QXBSXHD
+            #weighted_anatomy_queries = weighted_anatomy_queries.transpose(0,1)
+
+            #output_path  = output_path + self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1) * weighted_anatomy_queries
 
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
