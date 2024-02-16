@@ -219,7 +219,15 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
             #self.query_merging_params_ana.append(
             #    torch.nn.Embedding(num_queries,1)
             #)
+        
 
+        #### Include code for true cross attention merging
+            #self.ana_patho_ca = CrossAttentionLayer(d_model=hidden_dim,
+            #                                        nhead=nheads,
+            #                                        dropout=0.0,
+            #                                        normalize_before=pre_norm
+            #                    )
+            self.ana_patho_ca = nn.MultiheadAttention(embed_dim=256,num_heads=nheads,dropout=0.0)
 
     @classmethod
     def from_config(cls, cfg, in_channels, mask_classification):
@@ -359,17 +367,24 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
             
             #Normalize and reshape to BSXQXH
             
-            norm_output = output.detach() / output.detach().norm(dim=2)[:,:,None]
-            norm_output = norm_output.transpose(0,1)
-            norm_path = output_path.detach() / output_path.detach().norm(dim=2)[:,:, None]
-            norm_path = norm_path.transpose(0,1)
+            # norm_output = output.detach() / output.detach().norm(dim=2)[:,:,None]
+            # norm_output = norm_output.transpose(0,1)
+            # norm_path = output_path.detach() / output_path.detach().norm(dim=2)[:,:, None]
+            # norm_path = norm_path.transpose(0,1)
             
-            cosine_similarity_matrix = torch.bmm(norm_output, norm_path.transpose(1,2))
+            # cosine_similarity_matrix = torch.bmm(norm_output, norm_path.transpose(1,2))
 
-            weighted_anatomy_queries = torch.bmm(cosine_similarity_matrix,norm_output)
+            # weighted_anatomy_queries = torch.bmm(cosine_similarity_matrix,norm_output)
 
-            #Reshape back to QXBSXHD
-            weighted_anatomy_queries = weighted_anatomy_queries.transpose(0,1)
+            # #Reshape back to QXBSXHD
+            # weighted_anatomy_queries = weighted_anatomy_queries.transpose(0,1)
+
+            ###### Ablation True CA
+            ca_output, ca_weights  = self.ana_patho_ca(
+                output_path, output, output
+            )
+
+            
 
             ##############################################################################################
             #Ablation: Drop most informative pathology queries
@@ -389,7 +404,7 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
 
             ##############################################################################################
 
-            output_path  = output_path + self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1) * weighted_anatomy_queries
+            output_path  = output_path + self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1) * ca_output
 
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
