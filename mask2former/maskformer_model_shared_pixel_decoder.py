@@ -265,9 +265,13 @@ class MaskFormer_shared_bb_pixdecoder(nn.Module):
                     losses_pathology.pop(k)
             
             #Merge the two loss dicts
-            pathology_anatomy_weight = 0
+            pathology_anatomy_weight = 0.5
+            loss_ana_item = sum(losses_anatomy.values()).detach().item()/len(losses_anatomy)
+            loss_pat_item = sum(losses_pathology.values()).detach().item()/len(losses_pathology)
+            loss_ratio = loss_ana_item/loss_pat_item
+            pathology_anatomy_weight = 0.5
             merged_losses = {
-                k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k] for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
+                k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k]*loss_ratio for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
             }
             return merged_losses
         else:
