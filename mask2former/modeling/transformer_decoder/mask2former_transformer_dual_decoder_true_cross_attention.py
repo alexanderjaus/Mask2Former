@@ -208,6 +208,7 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
 
         ##Parameters for simple merging
         self.query_merging_params_ana = nn.ModuleList()
+        self.ana_patho_ca = nn.ModuleList()
         #self.query_merging_params_patho = nn.ModuleList()
         for _ in range(self.num_feature_levels):
             self.query_merging_params_ana.append(
@@ -227,7 +228,10 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
             #                                        dropout=0.0,
             #                                        normalize_before=pre_norm
             #                    )
-            self.ana_patho_ca = nn.MultiheadAttention(embed_dim=256,num_heads=nheads,dropout=0.0)
+        #self.ana_patho_ca = nn.ModuleList()
+            self.ana_patho_ca.append(
+                nn.MultiheadAttention(embed_dim=256,num_heads=nheads,dropout=0.0)
+            )
 
     @classmethod
     def from_config(cls, cfg, in_channels, mask_classification):
@@ -380,10 +384,9 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
             # weighted_anatomy_queries = weighted_anatomy_queries.transpose(0,1)
 
             ###### Ablation True CA
-            ca_output, ca_weights  = self.ana_patho_ca(
+            ca_output, ca_weights  = self.ana_patho_ca[level_index](
                 output_path, output, output
             )
-
             
 
             ##############################################################################################
