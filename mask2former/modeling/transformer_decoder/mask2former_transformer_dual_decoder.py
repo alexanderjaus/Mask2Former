@@ -218,14 +218,9 @@ class QueryMixer_SNE(nn.Module):
         )
         linear_layer_sizes = [nof_anatomy_queries + nof_patho_queries, int((nof_anatomy_queries+nof_anatomy_queries)*0.75), int((nof_anatomy_queries+nof_anatomy_queries)*0.5)]
         self.fc = nn.Sequential(
-            nn.Linear(linear_layer_sizes[0],linear_layer_sizes[1]),
-            nn.BatchNorm1d(1),
-            nn.ReLU(),
-            nn.Linear(linear_layer_sizes[1],linear_layer_sizes[2]),
-            nn.BatchNorm1d(1),
-            nn.ReLU()
+            nn.Linear(nof_anatomy_queries+1,nof_anatomy_queries),
+            nn.Linear(nof_anatomy_queries,nof_anatomy_queries)
         )
-        self.upsampler = nn.Conv1d(1,hidden_dim,kernel_size=1)
     
     def forward(self,anatomy_queries,pathology_queries):
         #Assuming shape is Nof_queryXbsXhd
@@ -233,16 +228,29 @@ class QueryMixer_SNE(nn.Module):
         nof_queries_a, bs, hd = anatomy_queries.shape
         nof_queries_p, _, _ = pathology_queries.shape
         #Step 1: Reshape to BSxHDxQ
-        anatomy_queries = anatomy_queries.permute((1,2,0))
-        pathology_queries = pathology_queries.permute((1,2,0))
-
-        anatomy_down = self.anatomy_conv(anatomy_queries)
-        patholog_down = self.pathology_conv(pathology_queries)
-        mixed_global = self.fc(torch.concat([anatomy_down,patholog_down],dim=2))
-        upsampled = self.upsampler(mixed_global) 
-        return upsampled.permute(2,0,1)
+        anatomy_reshaped = anatomy_queries.permute(1,2,0)
+        pathology_reshaped = pathology_queries.permute((1,2,0))
+        anatomy_down = self.anatomy_conv(anatomy_reshaped)
+        patholog_down = self.pathology_conv(pathology_reshaped)
+        mixed_queries = []
+        for i in range(patholog_down.size(2)):
+            patho_elem = patholog_down[:, :, i:i+1]
+            anatomy_with_patho_element = torch.cat((anatomy_down, patho_elem), dim=2)
+            mixed_queries.append(anatomy_with_patho_element)
+        mixed_queries = torch.stack(mixed_queries, dim=2)
         
+        weights = self.fc(mixed_queries)
+        weights = F.softmax(weights,dim=3)
         
+        for q_idx in range(100):
+            running_query = anatomy_queries[0,:,:]*weights[0,0,q_idx,0]
+            for w in range(1,100):
+                running_query += anatomy_queries[i,:,:]*weights[0,0,q_idx,w]
+            pathology_queries[q_idx,:,:] += running_query
+        
+        out = torch.bmm(weights.squeeze(1),a)
+        print(out.shape)
+             
 
 @TRANSFORMER_DECODER_REGISTRY.register()
 class MultiScaleMaskedDualTransformerDecoder(nn.Module):
@@ -376,7 +384,6 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
             self.class_embed = nn.Linear(hidden_dim, num_classes_anatomy + 1)
         self.mask_embed = MLP(hidden_dim, hidden_dim, mask_dim, 3)
 
-
         ####### Pathology Strucure Setup starts here
         self.pe_layer_patho = PositionEmbeddingSine(N_steps, normalize=True)
         self.transformer_self_attention_layers_pathology = nn.ModuleList()
@@ -438,14 +445,14 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
         ##Parameters for simple merging
         self.query_merging_params_ana = nn.ModuleList()
         self.query_merging_params_patho = nn.ModuleList()
-        for _ in range(self.num_feature_levels):
-            self.query_merging_params_ana.append(
-                torch.nn.Embedding(num_queries, hidden_dim)
-            )
-            self.query_merging_params_patho.append(
-                torch.nn.Embedding(self.num_queries_path, hidden_dim)
-            )
-
+        #for _ in range(self.num_feature_levels):
+        #    self.query_merging_params_ana.append(
+        #        torch.nn.Embedding(num_queries, hidden_dim)
+        #    )
+        #    self.query_merging_params_patho.append(
+        #        torch.nn.Embedding(self.num_queries_path, hidden_dim)
+        #    )
+        #self.mixer = QueryMixer_SNE(nof_anatomy_queries=100, nof_patho_queries=100)
 
 
     @classmethod
@@ -578,20 +585,17 @@ class MultiScaleMaskedDualTransformerDecoder(nn.Module):
                 output_path
             )
 
-            ###THIS IS ALL WE DO:
+            
+            ## Communicate up until last layer. Last layer should 
+            if i < self.num_layers - 1:
+                output_path += torch.mean(torch.stack([output_path,output]),dim=0)
             #OUTPUT Anatomy: QxBSxHD (100X2X256)
             #OUTPUT Pathology: QXBSXHD (100X2X256)
             
             #output, output_path =  output + output_path * self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1), output_path + output * self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1)
             ############### Variant: Qurey MIXER ###################
             # Assumption: anatomy, pathology NOFxBSxHD
-            nof_a, bs_a, hd_a = output.shape
-            nof_p, bs_p, hd_p = output_path.shape 
-            assert bs_a == bs_p, f"Assuming batch size for anatomy and pathology should be the same, but got {bs_a} and {bs_p}"
-            assert hd_a == hd_p, f"Assuming hidden dimension for anatomy and pathology should be same, but got {hd_a} and {hd_p}"
-            mixer = QueryMixer_SNE(nof_anatomy_queries=nof_a, nof_patho_queries=nof_p).to(output.device)
-            mixed_path = mixer(output, output_path)
-            output_path = output_path + self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1) * mixed_path
+
             ###############################
             #Ablation: Take out the most important queries
             #output, output_path =  output + output_path * self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1), output_path + output * self.query_merging_params_patho[level_index].weight.unsqueeze(1).repeat(1, bs, 1)
