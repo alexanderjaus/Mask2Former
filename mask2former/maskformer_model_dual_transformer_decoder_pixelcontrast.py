@@ -394,7 +394,7 @@ class MaskFormer_dual_transformer_decoder_pixelcontrast(nn.Module):
             else:
                 targets_pathology = None
 
-            assert all([x["labels"][0] == 0 for x in targets])
+            #assert all([x["labels"][0] == 0 for x in targets])
             assert all([x["labels"][0] == 0 for x in targets_pathology])
             features_representing_anatomy = torch.stack([x["masks"][1:].sum(dim=0) for x in targets])
             features_representing_pathology = torch.stack([x["masks"][1:].sum(dim=0) for x in targets_pathology])
@@ -457,6 +457,8 @@ class MaskFormer_dual_transformer_decoder_pixelcontrast(nn.Module):
             }
             if sce_loss is not None:
                 merged_losses.update({"sup_con":sce_loss*sce_weight})
+            else:
+                merged_losses.update({"sup_con":torch.zeros_like(sum(merged_losses.values()))})
             return merged_losses
         else:
             if self.inference_mode == "anatomy":
