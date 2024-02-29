@@ -19,7 +19,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 
-import nibabel as nib
+#import nibabel as nib
 
 """
 Author: Yonglong Tian (yonglong@mit.edu)
@@ -378,8 +378,8 @@ class MaskFormer_dual_transformer_decoder_pixelcontrast(nn.Module):
 
         features = self.backbone(images.tensor)
         anatomy_outputs, pathology_outputs, mask_features = self.sem_seg_head(features)
-        assert len(batched_inputs)==1
-        os.environ["CANCER_ID"]=batched_inputs[0]["file_name"].split("/")[-1].split("_")[2]
+        #assert len(batched_inputs)==1
+        #os.environ["CANCER_ID"]=batched_inputs[0]["file_name"].split("/")[-1].split("_")[2]
         if self.training:
             # mask classification target
             if "instances" in batched_inputs[0]:
@@ -413,8 +413,8 @@ class MaskFormer_dual_transformer_decoder_pixelcontrast(nn.Module):
                 selected_elements_pathology = mask_features[i][:, features_representing_pathology[i,0]]
                 collected_anatomy_features.append(selected_elements_anatomy)
                 collected_pathology_features.append(selected_elements_pathology)
-            collected_anatomy_features = torch.stack(collected_anatomy_features).flatten(end_dim=1).transpose(0,1)
-            collected_pathology_features = torch.stack(collected_pathology_features).flatten(end_dim=1).transpose(0,1)
+            collected_anatomy_features = torch.concat(collected_anatomy_features,dim=1).transpose(0,1)
+            collected_pathology_features = torch.concat(collected_pathology_features,dim=1).transpose(0,1)
             
             
 
