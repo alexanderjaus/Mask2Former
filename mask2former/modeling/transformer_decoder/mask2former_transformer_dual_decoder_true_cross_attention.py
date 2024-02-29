@@ -207,13 +207,13 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
         self.mask_embed_path = MLP(hidden_dim, hidden_dim, mask_dim, 3)
 
         ##Parameters for simple merging
-        #self.query_merging_params_ana = nn.ModuleList()
+        self.query_merging_params_ana = nn.ModuleList()
         #self.ana_patho_ca = nn.ModuleList()
         #self.query_merging_params_patho = nn.ModuleList()
-        #for _ in range(self.num_feature_levels):
-        #    self.query_merging_params_ana.append(
-        #        torch.nn.Embedding(num_queries, hidden_dim)
-        #    )
+        for _ in range(self.num_feature_levels):
+            self.query_merging_params_ana.append(
+                torch.nn.Embedding(num_queries, hidden_dim)
+            )
             #self.query_merging_params_patho.append(
             #    torch.nn.Embedding(self.num_queries_path, hidden_dim)
             #)
@@ -405,7 +405,7 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
 
             ##############################################################################################
 
-            output_path  = output_path + ca_output
+            output_path  = output_path +  self.query_merging_params_ana[level_index].weight.unsqueeze(1).repeat(1, bs, 1) * ca_output
 
             outputs_class, outputs_mask, attn_mask = self.forward_prediction_heads(output, mask_features, attn_mask_target_size=size_list[(i + 1) % self.num_feature_levels])
             predictions_class.append(outputs_class)
