@@ -238,8 +238,10 @@ class MultiScaleMaskedDualTransformerDecoderTrueCrossAttention(nn.Module):
         ret["mask_classification"] = mask_classification
         
         #TODO: ACTUALLY READ FROM CONFIG!!!!!!!!
-
-        ret["num_classes_anatomy"] = 145
+        if "OCT" in os.environ:
+            ret["num_classes_anatomy"] = 8
+        else:
+            ret["num_classes_anatomy"] = 145
         ret["num_classes_pathology"] = 2
         ret["hidden_dim"] = cfg.MODEL.MASK_FORMER.HIDDEN_DIM
         ret["num_queries"] = cfg.MODEL.MASK_FORMER.NUM_OBJECT_QUERIES
