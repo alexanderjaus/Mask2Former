@@ -15,9 +15,11 @@ from detectron2.utils.memory import retry_if_cuda_oom
 
 from .modeling.criterion import SetCriterion
 from .modeling.matcher import HungarianMatcher
-
+import os
+import matplotlib.pyplot as plt
 import numpy as np
 
+import nibabel as nib
 @META_ARCH_REGISTRY.register()
 class MaskFormer_dual_transformer_decoder(nn.Module):
     """
@@ -211,10 +213,12 @@ class MaskFormer_dual_transformer_decoder(nn.Module):
         images = [x["image"].to(self.device) for x in batched_inputs]
         images = [(x - self.pixel_mean) / self.pixel_std for x in images]
         images = ImageList.from_tensors(images, self.size_divisibility)
+        
+        #assert len(batched_inputs)==1
+        #os.environ["CANCER_ID"]=batched_inputs[0]["file_name"].split("/")[-1].split("_")[2]
 
         features = self.backbone(images.tensor)
         anatomy_outputs, pathology_outputs = self.sem_seg_head(features)
-
         if self.training:
             # mask classification target
             if "instances" in batched_inputs[0]:
@@ -251,6 +255,19 @@ class MaskFormer_dual_transformer_decoder(nn.Module):
             
             #Merge the loss
 
+            #Merge the loss
+
+            merged_losses = {
+                k + "_anatomy": v for (k,v) in losses_anatomy.items()
+            }
+            for k,v in losses_pathology.items():
+                merged_losses.update({k + "_pathology": v})
+            
+            return merged_losses
+            # Loss scheduler
+            pathology_anatomy_weight = 0.5
+            pathology_anatomy_weight = -5.555555555555556e-06*self.iter + 0.5
+            #Scale the losses to reflect the desired output
             merged_losses = {
                 k + "_anatomy": v for (k,v) in losses_anatomy.items()
             }
@@ -308,7 +325,6 @@ class MaskFormer_dual_transformer_decoder(nn.Module):
                         instance_r = retry_if_cuda_oom(self.instance_inference)(mask_cls_result, mask_pred_result)
                         processed_results_anatomy[-1]["instances"] = instance_r
                 
-                
                 return processed_results_anatomy
             
 
@@ -358,6 +374,64 @@ class MaskFormer_dual_transformer_decoder(nn.Module):
                     if self.instance_on:
                         instance_r = retry_if_cuda_oom(self.instance_inference)(mask_cls_result, mask_pred_result)
                         processed_results_pathology[-1]["instances"] = instance_r
+
+                if "RESULTS_PATH" in os.environ:
+                    qual_results = [x["sem_seg"].argmax(dim=0) for x  in processed_results_pathology]
+                    target_path = os.environ["RESULTS_PATH"]
+                    for i,r in enumerate(qual_results):
+                        if True:
+                        #if 1 in np.unique(r.cpu()) and 1 in batched_inputs[i]["sem_seg"]:
+                            #fig = plt.figure(figsize=(10, 5))
+                            #fig.add_subplot(2, 2, 1) 
+                            #plt.imshow(images[i].cpu().permute(1,2,0)[:,:,0])
+                            nifti_ct = nib.Nifti1Image(images[i].cpu().permute(1,2,0)[:,:,0].numpy(), affine=np.eye(4))
+                            nifti_ct.to_filename(os.path.join(target_path,"ct.nii"))
+                            nifti_pet = nib.Nifti1Image(images[i].cpu().permute(1,2,0)[:,:,1].numpy(), affine=np.eye(4))
+                            nifti_pet.to_filename(os.path.join(target_path,"pet.nii"))
+                            nifti_gt = nib.Nifti1Image(batched_inputs[i]["sem_seg"].numpy().astype(np.uint8), affine=np.eye(4))
+                            nifti_gt.to_filename(os.path.join(target_path,"gt.nii"))
+                            nifty_pred = nib.Nifti1Image(r.cpu().numpy().astype(np.uint8), affine=np.eye(4))
+                            nifty_pred.to_filename(os.path.join(target_path,"pred.nii"))
+                            
+                            #Select based on entire volume
+
+                            if "_".join(batched_inputs[i]["file_name"].split("/")[-1].split("_")[2:6]) in ["2e97a9e5c2_2003_6_23","ae96f738c0_2003_5_1","ba717a1f22_2003_3_28","2f7200f771_2005_11_5","d69c3fceba_2003_4_5"]:
+                                cur_file_name = batched_inputs[i]["file_name"].split("/")[-1]
+                                cur_file_name = cur_file_name.split(".")[0]
+                                nifti_ct.to_filename(os.path.join(target_path,cur_file_name+"_ct.nii"))
+                                nifti_pet.to_filename(os.path.join(target_path,cur_file_name+"_pet.nii"))
+                                nifti_gt.to_filename(os.path.join(target_path,cur_file_name+"_gt.nii"))
+                                nifty_pred.to_filename(os.path.join(target_path,cur_file_name+"_pred.nii"))
+
+                            # #Skip the rest for now    
+                            continue
+
+                            #Calc Iou for this image
+                            intersection = np.logical_and(batched_inputs[i]["sem_seg"].numpy().astype(np.uint8) == 1, r.cpu().numpy().astype(np.uint8) == 1).sum()
+                            union = np.logical_or(batched_inputs[i]["sem_seg"].numpy().astype(np.uint8) == 1, r.cpu().numpy().astype(np.uint8) == 1).sum()
+                            our_iou = intersection/union
+
+                            try:#Try to load the array of baseline
+                                baseline = nib.load("/local/baseline_results/"+batched_inputs[0]["file_name"].split("/")[-1]+".nii").get_fdata()
+                                intersection = np.logical_and(batched_inputs[i]["sem_seg"].numpy().astype(np.uint8) == 1, baseline == 1).sum()
+                                union = np.logical_or(batched_inputs[i]["sem_seg"].numpy().astype(np.uint8) == 1, baseline == 1).sum()
+                                baseline_iou = intersection/union
+
+                                if our_iou - baseline_iou>0.2 and baseline_iou>0.1:
+                                    print("YES!")
+                                    print("/local/baseline_results/"+batched_inputs[0]["file_name"].split("/")[-1]+".nii")
+
+                            except: 
+                                pass
+                            
+                            #fig.add_subplot(2, 2, 2) 
+                            #plt.imshow(images[i].cpu().permute(1,2,0)[:,:,1])
+                            #fig.add_subplot(2, 2, 3) 
+                            #plt.imshow(r.cpu())
+                            #fig.add_subplot(2, 2, 4)
+                            #plt.imshow(batched_inputs[i]["sem_seg"].cpu()) 
+                            #plt.savefig(os.path.join(target_path,batched_inputs[i]["file_name"].split("/")[-1]))
+                            #plt.close('all')
                 
                 return processed_results_pathology
             else:
