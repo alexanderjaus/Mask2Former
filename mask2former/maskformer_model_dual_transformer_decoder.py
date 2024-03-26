@@ -249,11 +249,14 @@ class MaskFormer_dual_transformer_decoder(nn.Module):
                     # remove this loss if not specified in `weight_dict`
                     losses_pathology.pop(k)
             
-            #Merge the two loss dicts
-            pathology_anatomy_weight = 0.5
+            #Merge the loss
+
             merged_losses = {
-                k:pathology_anatomy_weight*losses_anatomy[k] + (1-pathology_anatomy_weight)*losses_pathology[k] for k in set(losses_anatomy.keys()).intersection(losses_pathology.keys()) 
+                k + "_anatomy": v for (k,v) in losses_anatomy.items()
             }
+            for k,v in losses_pathology.items():
+                merged_losses.update({k + "_pathology": v})
+            
             return merged_losses
         else:
             if self.inference_mode == "anatomy":
